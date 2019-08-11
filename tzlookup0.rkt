@@ -22,7 +22,7 @@
 (define (tz-lookup lat lon)
   #f)
 
-(module+ test
+(module+ main
   (require rackunit)
   (define test-data
     (call-with-input-file "./tz-test-cases.rktd" read))

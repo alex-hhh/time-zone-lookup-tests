@@ -1,5 +1,5 @@
 #lang racket
-;; tzlookup6.rkt -- Use flonum operations in `subtended-angle`
+;; tzlookup8.rkt -- Load feature data using `fasl->s-exp`
 ;;
 ;; This file is part of Time Zone Lookup Tests -- https://github.com/alex-hhh/time-zone-lookup-tests
 ;; Copyright (c) 2019 Alex Harsányi <AlexHarsanyi@gmail.com>
@@ -20,100 +20,27 @@
 (require "al-profiler.rkt"
          json
          math/flonum
-         math/base)
+         math/base
+         racket/fasl)
 
 ;; A BOUNDING BOX contains the min/max coordinates that enclose a polygon.
-(struct bbox (min-x min-y max-x max-y) #:transparent)
+(struct bbox (min-x min-y max-x max-y) #:prefab)
 
 ;; A POLYGON is defined as its bounding box and the list of points
-(struct polygon (bbox points) #:transparent)
+(struct polygon (bbox points) #:prefab)
 
 ;; A SHAPE is defined as a polygon outline and a set of holes, which are also
 ;; polygons.
-(struct shape (outline holes) #:transparent)
+(struct shape (outline holes) #:prefab)
 
 ;; A FEATURE is a collection of shapes with a name (the timezone name in our
 ;; case).
-(struct feature (name shapes) #:transparent)
-
-;; Calculate the bounding box of a list of POINTS and return it as a `bbox`
-;; struct.
-(define (make-bbox points)
-  (if (null? points)
-      #f
-      (let ([p0 (first points)])
-        (let loop ([min-x (first p0)] [min-y (second p0)]
-                   [max-x (first p0)] [max-y (second p0)]
-                   [remaining (rest points)])
-          (if (null? remaining)
-              (bbox min-x min-y max-x max-y)
-              (let ([p1 (first remaining)])
-                (loop (min min-x (first p1)) (min min-y (second p1))
-                      (max max-x (first p1)) (max max-y (second p1))
-                      (rest remaining))))))))
+(struct feature (name shapes) #:prefab)
 
 ;; Return #t if the point at LAT,LON is inside the bounding box BB
 (define (inside-bbox? bb lat lon)
   (match-define (bbox min-x min-y max-x max-y) bb)
   (and (>= lon min-x) (<= lon max-x) (>= lat min-y) (<= lat max-y)))
-
-;; Construct a polygon instance from a list of POINTS.  We calculate the
-;; bounding box than store it and the points themselves (converted to a
-;; vector) in a POLYGON instance.
-(define (make-polygon points)
-  (define num-points (length points))
-  (define data (make-flvector (* 2 num-points)))
-  (for ([(point index) (in-indexed (in-list points))])
-    (match-define (list x y) point)
-    (flvector-set! data (* 2 index) (exact->inexact x))
-    (flvector-set! data (+ (* 2 index) 1) (exact->inexact y)))
-  (polygon (make-bbox points) data))
-
-;; Construct a SHAPE from a set GeoJSON Polygon.  The first item in the
-;; GEOJSON-SHAPE list is a set of points for the outline, while the remaining
-;; items are points for the holes.  We construct polygon instances for the
-;; outline and the holes and construct a SHAPE instance with them.
-(define (make-shape geojson-shape)
-  (define outline (make-polygon (first geojson-shape)))
-  (define holes (map make-polygon (rest geojson-shape)))
-  (shape outline holes))
-
-;; Construct a FEATURE from a GeoJSON feature node.  We extract the time zone
-;; name and construct the appropriate SHAPE instances for it.
-(define (make-feature geojson-feature)
-  (define name
-    (let ([properties (hash-ref geojson-feature 'properties)])
-      (hash-ref properties 'tzid #f)))
-  (define shapes
-    (let ([geometry (hash-ref geojson-feature 'geometry (lambda () (hash)))])
-      (let ([shapes (hash-ref geometry 'coordinates null)]
-            [type (hash-ref geometry 'type #f)])
-        (cond ((equal? type "Polygon")
-               (list (make-shape shapes)))
-              ((equal? type "MultiPolygon")
-               ;; Must be in any of the shapes
-               (map make-shape shapes))
-              (#t
-               (error (format "inside-feature? unsupported geometry type: ~a" type)))))))
-  (feature name shapes))
-
-;; Load a GeoJSON file from PATH.  This is just a wrapper for `read-json`, and
-;; when VERBOSE? is #t, it will print out the amount of time it took to read
-;; the file.  No other processing is done on the file.
-(define/profile (load-geojson path #:verbose (verbose? #f))
-  (define start (current-inexact-milliseconds))
-  (when verbose?
-    (printf "Loading GeoJSON from ~a ..." path)
-    (flush-output))
-  (define data (call-with-input-file path read-json))
-  (when verbose?
-    (define duration (- (current-inexact-milliseconds) start))
-    (printf " done (~a seconds).~%" (~r (/ duration 1000.0) #:precision 2)))
-  data)
-
-(define/profile (prepare-features geojson)
-  (for/list ([feature (hash-ref geojson 'features '())])
-    (make-feature feature)))
 
 ;; Determine the angle seen from P0 between the points P1 and P2, or, more
 ;; formally, between the vectors P1 - P0 and P2 - P0. Returns a positive value
@@ -130,9 +57,9 @@
   (define s2x (fl- x2 x0))
   (define s2y (fl- y2 y0))
   (define s2len (flsqrt (fl+ (fl* s2x s2x) (fl* s2y s2y))))
-  
+
   (define dot-product (fl+ (fl* s1x s2x) (fl* s1y s2y)))
-  
+
   (if (or (zero? dot-product) (zero? s1len) (zero? s1len))
       0
       (let ([angle (flacos (flmin 1.0 (fl/ dot-product (fl* s1len s2len))))])
@@ -160,17 +87,17 @@
 ;; computation.  This exists as a separate function so its time can be
 ;; measured.
 (define/profile (polygon-winding-number-internal poly lat lon)
-  (define limit (/ (flvector-length poly) 2))
+  (define limit (/ (vector-length poly) 2))
   (define winding-angle
     (for/fold ([winding-angle 0])
               ([index (in-range limit)])
-      (define x1 (flvector-ref poly (* 2 index)))
-      (define y1 (flvector-ref poly (+ (* 2 index) 1)))
+      (define x1 (vector-ref poly (* 2 index)))
+      (define y1 (vector-ref poly (+ (* 2 index) 1)))
       (define next-index (if (= (add1 index) limit)
                               0
                               (add1 index)))
-      (define x2 (flvector-ref poly (* 2 next-index)))
-      (define y2 (flvector-ref poly (+ (* 2 next-index) 1)))
+      (define x2 (vector-ref poly (* 2 next-index)))
+      (define y2 (vector-ref poly (+ (* 2 next-index) 1)))
       (define angle (subtended-angle lon lat x1 y1 x2 y2))
       (+ winding-angle angle)))
   (abs (/ winding-angle (* 2 pi))))
@@ -198,7 +125,7 @@
 
 ;; Return the winding number of a GeoJSON feature with respect to the point at
 ;; LAT,LON.
-;; 
+;;
 (define/profile (feature-winding-number feature lat lon)
   (for/fold ([wn 0])
             ([shape (in-list (feature-shapes feature))])
@@ -228,11 +155,12 @@
     ((list (list n1 w1) other ...)
      n1)))
 
+(define/profile (load-data path)
+  (call-with-input-file path fasl->s-exp))
+
 ;; The timezone data JSON contains a 'features list, each feature being a time
 ;; zone definition
-(define features
-  (let ([tzdata (load-geojson "./data/combined.json" #:verbose #t)])
-    (prepare-features tzdata)))
+(define features (load-data "./tzdata.dat"))
 
 (define/profile (tz-lookup lat lon)
   (define candidates

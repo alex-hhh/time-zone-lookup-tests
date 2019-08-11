@@ -250,7 +250,7 @@
          (printf "Multiple candidates for: ~a ~a: ~a~%" lat lon (sort filtered > #:key second))
          (select-candidate filtered))))
 
-(module+ test
+(module+ main
   (require rackunit)
   (profile-enable-all #t)
   (define test-data
